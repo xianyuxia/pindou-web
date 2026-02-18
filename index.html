@@ -9,6 +9,7 @@
 <body>
     <div class="container">
         <h1>拼豆图纸生成器</h1>
+        <div class="workflow-status" id="workflow-status">当前进度：1/4 上传图片</div>
         <div class="upload-section">
             <h2>步骤 1: 上传PNG图片</h2>
             <input type="file" id="image-upload" accept=".png" />
@@ -38,10 +39,10 @@
                 <label for="show-grid-lines">显示辅助线:</label>
                 <input type="checkbox" id="show-grid-lines" checked />
             </div>
-            <button id="generate-btn">生成图纸</button>
+            <button id="generate-btn">步骤 3: 生成图纸</button>
         </div>
         <div class="result-section" style="display: none;">
-            <h2>步骤 3: 查看结果</h2>
+            <h2>步骤 4: 查看结果并微调颜色</h2>
             <div id="result-container">
                 <canvas id="result-canvas"></canvas>
                 <div id="color-legend"></div>
