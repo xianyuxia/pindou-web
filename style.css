@@ -31,6 +31,16 @@ h2 {
     font-size: 18px;
 }
 
+.workflow-status {
+    margin-bottom: 15px;
+    padding: 10px 14px;
+    border-radius: 6px;
+    background-color: #eef6ff;
+    border: 1px solid #cfe3ff;
+    color: #1f4f82;
+    font-weight: bold;
+}
+
 .upload-section,
 .options-section,
 .result-section {

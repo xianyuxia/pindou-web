@@ -168,6 +168,11 @@ let originalImageData = null; // 原始图像数据
 let latestPatternData = null; // 最近一次生成的图纸缓存（避免二次量化导致结果抖动）
 let currentModalPalette = []; // 当前模态窗口预览使用的调色板
 let lockedGenerationPalette = null; // 用户确认后锁定用于生成图纸的调色板
+let workflowState = {
+    imageUploaded: false,
+    colorMatched: false,
+    patternGenerated: false
+};
 
 // 初始化事件监听
 function initEventListeners() {
@@ -214,8 +219,47 @@ function initEventListeners() {
     });
 }
 
+function updateWorkflowStatus() {
+    const statusElement = document.getElementById('workflow-status');
+    if (!statusElement) return;
+
+    if (!workflowState.imageUploaded) {
+        statusElement.textContent = '当前进度：1/4 上传图片';
+        return;
+    }
+
+    if (!workflowState.colorMatched) {
+        statusElement.textContent = '当前进度：2/4 选择并确认颜色';
+        return;
+    }
+
+    if (!workflowState.patternGenerated) {
+        statusElement.textContent = '当前进度：3/4 生成图纸';
+        return;
+    }
+
+    statusElement.textContent = '当前进度：4/4 完成，可继续微调/下载';
+}
+
+function ensureImageUploaded() {
+    if (workflowState.imageUploaded) return true;
+    alert('请先完成步骤1：上传PNG图片');
+    return false;
+}
+
+function ensureColorMatched() {
+    if (workflowState.colorMatched) return true;
+    alert('请先完成步骤2：确认颜色匹配');
+    if (uploadedImage) {
+        showColorMatchModal(uploadedImage);
+    }
+    return false;
+}
+
 // 应用颜色替换
 function applyColorReplace() {
+    if (!ensureImageUploaded() || !ensureColorMatched()) return;
+
     const controlsContainer = document.getElementById('color-replace-controls');
     const selectElements = controlsContainer ? controlsContainer.querySelectorAll('.color-replace-select') : [];
     const colorReplaceMap = new Map();
@@ -344,6 +388,9 @@ function generatePatternWithColorReplace(colorReplaceMap) {
     
     // 显示下载按钮
     document.getElementById('download-btn').style.display = 'block';
+
+    workflowState.patternGenerated = true;
+    updateWorkflowStatus();
 }
 
 // 只更新颜色图例，不重新生成颜色替换控件
@@ -441,8 +488,16 @@ function handleImageUpload(e) {
             userColorMap.clear();
             currentModalPalette = [];
             lockedGenerationPalette = null;
+            latestPatternData = null;
+            workflowState.imageUploaded = true;
+            workflowState.colorMatched = false;
+            workflowState.patternGenerated = false;
+            document.querySelector('.result-section').style.display = 'none';
+            document.getElementById('download-btn').style.display = 'none';
+            document.getElementById('color-replace-section').style.display = 'none';
             displayImagePreview(img);
-            
+            updateWorkflowStatus();
+
             // 显示颜色匹配模态窗口
             showColorMatchModal(img);
         };
@@ -477,6 +532,9 @@ function showColorMatchModal(img) {
     
     // 每次打开弹窗前都解锁旧调色板，待用户再次确认后重新锁定
     lockedGenerationPalette = null;
+    workflowState.colorMatched = false;
+    workflowState.patternGenerated = false;
+    updateWorkflowStatus();
 
     // 更新颜色预览
     updateColorPreview();
@@ -558,7 +616,11 @@ function confirmColorMatch() {
     
     // 显示重新选择颜色按钮
     document.getElementById('reopen-color-match').style.display = 'block';
-    
+
+    workflowState.colorMatched = true;
+    workflowState.patternGenerated = false;
+    updateWorkflowStatus();
+
     // 现在可以生成图纸
     console.log('颜色匹配确认，使用', selectedColorCount, '种颜色');
     console.log('用户颜色映射:', userColorMap);
@@ -1067,10 +1129,7 @@ function displayImagePreview(img) {
 
 // 生成拼豆图纸
 function generatePattern() {
-    if (!uploadedImage) {
-        alert('请先上传PNG图片');
-        return;
-    }
+    if (!ensureImageUploaded() || !ensureColorMatched()) return;
     
     // 获取参数
     const options = getValidatedPatternOptions();
@@ -1222,6 +1281,9 @@ function generatePattern() {
     
     // 显示下载按钮
     document.getElementById('download-btn').style.display = 'block';
+
+    workflowState.patternGenerated = true;
+    updateWorkflowStatus();
 }
 
 // 绘制辅助线
@@ -1424,6 +1486,8 @@ function generateColorReplaceControls(usedColors) {
 
 // 实时应用颜色替换
 function applyRealTimeColorReplace() {
+    if (!ensureImageUploaded() || !ensureColorMatched()) return;
+
     const controlsContainer = document.getElementById('color-replace-controls');
     const selectElements = controlsContainer ? controlsContainer.querySelectorAll('.color-replace-select') : [];
     const colorReplaceMap = new Map();
@@ -1463,6 +1527,7 @@ function downloadPattern() {
 // 初始化应用
 function initApp() {
     initEventListeners();
+    updateWorkflowStatus();
     console.log('拼豆图纸生成器已初始化');
 }
 
