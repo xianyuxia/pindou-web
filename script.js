@@ -166,6 +166,8 @@ let selectedColorCount = 8; // 默认8种颜色
 let colorMap = new Map(); // 颜色映射
 let originalImageData = null; // 原始图像数据
 let latestPatternData = null; // 最近一次生成的图纸缓存（避免二次量化导致结果抖动）
+let currentModalPalette = []; // 当前模态窗口预览使用的调色板
+let lockedGenerationPalette = null; // 用户确认后锁定用于生成图纸的调色板
 
 // 初始化事件监听
 function initEventListeners() {
@@ -199,6 +201,7 @@ function initEventListeners() {
             document.querySelectorAll('.color-count-btn').forEach(b => b.classList.remove('active'));
             this.classList.add('active');
             selectedColorCount = parseInt(this.dataset.count);
+            lockedGenerationPalette = null;
             updateColorPreview();
         });
     });
@@ -435,6 +438,9 @@ function handleImageUpload(e) {
         const img = new Image();
         img.onload = function() {
             uploadedImage = img;
+            userColorMap.clear();
+            currentModalPalette = [];
+            lockedGenerationPalette = null;
             displayImagePreview(img);
             
             // 显示颜色匹配模态窗口
@@ -469,6 +475,9 @@ function showColorMatchModal(img) {
         }
     });
     
+    // 每次打开弹窗前都解锁旧调色板，待用户再次确认后重新锁定
+    lockedGenerationPalette = null;
+
     // 更新颜色预览
     updateColorPreview();
     
@@ -487,12 +496,13 @@ function updateColorPreview() {
     
     // 执行颜色量化
     const quantizedData = quantizeColors(originalImageData, selectedColorCount);
+    currentModalPalette = quantizedData.palette;
     
     // 绘制量化后的图像
     colorPreviewCtx.putImageData(quantizedData.imageData, 0, 0);
     
     // 生成颜色映射
-    generateColorMap(quantizedData.palette);
+    generateColorMap(currentModalPalette);
 }
 
 // 绘制像素格子效果
@@ -534,6 +544,11 @@ function confirmColorMatch() {
             userColorMap.set(originalColor, targetColor);
         }
     });
+
+    // 锁定当前模态窗口的调色板，确保后续生成与预览一致
+    lockedGenerationPalette = Array.isArray(currentModalPalette)
+        ? currentModalPalette.map(color => ({ ...color }))
+        : null;
     
     // 更新图片预览区域，显示经过颜色替换后的预览图
     updateImagePreviewWithColorReplace();
@@ -573,9 +588,22 @@ function updateImagePreviewWithColorReplace() {
     const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
     const data = imageData.data;
     
-    // 执行颜色量化
-    const quantizedData = quantizeColors(imageData, selectedColorCount);
-    const palette = quantizedData.palette;
+    // 执行颜色量化（优先使用用户在弹窗中确认时锁定的调色板，避免结果偏移）
+    let palette = null;
+    const canReuseLockedPalette =
+        Array.isArray(lockedGenerationPalette) &&
+        lockedGenerationPalette.length > 0 &&
+        originalImageData &&
+        originalImageData.width === imageData.width &&
+        originalImageData.height === imageData.height;
+
+    if (canReuseLockedPalette) {
+        palette = lockedGenerationPalette;
+    } else {
+        const quantizedData = quantizeColors(imageData, selectedColorCount);
+        palette = quantizedData.palette;
+        lockedGenerationPalette = palette.map(color => ({ ...color }));
+    }
     
     // 应用颜色映射
     for (let i = 0; i < data.length; i += 4) {
@@ -975,9 +1003,10 @@ function updateColorPreviewWithReplace() {
     // 创建临时画布数据
     const tempData = new Uint8ClampedArray(originalImageData.data);
     
-    // 执行颜色量化获取调色板
-    const quantizedData = quantizeColors(originalImageData, selectedColorCount);
-    const palette = quantizedData.palette;
+    // 使用当前模态窗口调色板（若未准备好则重新量化）
+    const palette = currentModalPalette && currentModalPalette.length > 0
+        ? currentModalPalette
+        : quantizeColors(originalImageData, selectedColorCount).palette;
     
     // 应用颜色映射
     for (let i = 0; i < tempData.length; i += 4) {
@@ -1074,9 +1103,22 @@ function generatePattern() {
     const imageData = tempCtx.getImageData(0, 0, scaledWidth, scaledHeight);
     const data = imageData.data;
     
-    // 执行颜色量化
-    const quantizedData = quantizeColors(imageData, selectedColorCount);
-    const palette = quantizedData.palette;
+    // 执行颜色量化（优先使用用户在弹窗中确认时锁定的调色板，避免结果偏移）
+    let palette = null;
+    const canReuseLockedPalette =
+        Array.isArray(lockedGenerationPalette) &&
+        lockedGenerationPalette.length > 0 &&
+        originalImageData &&
+        originalImageData.width === imageData.width &&
+        originalImageData.height === imageData.height;
+
+    if (canReuseLockedPalette) {
+        palette = lockedGenerationPalette;
+    } else {
+        const quantizedData = quantizeColors(imageData, selectedColorCount);
+        palette = quantizedData.palette;
+        lockedGenerationPalette = palette.map(color => ({ ...color }));
+    }
     
     // 生成格子图案
     const usedColors = new Set();
