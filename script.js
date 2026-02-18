@@ -165,6 +165,7 @@ let colorPreviewCtx = colorPreviewCanvas.getContext('2d');
 let selectedColorCount = 8; // 默认8种颜色
 let colorMap = new Map(); // 颜色映射
 let originalImageData = null; // 原始图像数据
+let latestPatternData = null; // 最近一次生成的图纸缓存（避免二次量化导致结果抖动）
 
 // 初始化事件监听
 function initEventListeners() {
@@ -252,20 +253,22 @@ function getValidatedPatternOptions() {
 
 // 使用颜色替换生成图纸
 function generatePatternWithColorReplace(colorReplaceMap) {
-    if (!uploadedImage) {
-        return;
+    if (!latestPatternData) {
+        // 没有缓存时先生成一次基础图纸
+        generatePattern();
+        if (!latestPatternData) return;
     }
-    
-    // 获取参数
+
+    // 每次应用替换都读取当前参数，允许用户调整格子大小/显示选项后再应用
     const options = getValidatedPatternOptions();
     if (!options) return;
-    const { gridSize, maxWidth, maxHeight, showColorCodes, showGridLines } = options;
-    
-    // 计算缩放比例，保持图片原始比例
-    const scale = Math.min(maxWidth / uploadedImage.width, maxHeight / uploadedImage.height);
-    
-    const scaledWidth = Math.floor(uploadedImage.width * scale);
-    const scaledHeight = Math.floor(uploadedImage.height * scale);
+    const { gridSize, showColorCodes, showGridLines } = options;
+
+    const { scaledWidth, scaledHeight, pixelBaseColors } = latestPatternData;
+
+    if (!Array.isArray(pixelBaseColors) || pixelBaseColors.length !== scaledWidth * scaledHeight) {
+        return;
+    }
     
     // 设置画布大小，确保每个格子都是正方形
     canvas.width = scaledWidth * gridSize;
@@ -274,77 +277,17 @@ function generatePatternWithColorReplace(colorReplaceMap) {
     // 清空画布
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // 临时画布用于处理图片
-    const tempCanvas = document.createElement('canvas');
-    const tempCtx = tempCanvas.getContext('2d');
-    tempCanvas.width = scaledWidth;
-    tempCanvas.height = scaledHeight;
-    
-    // 缩放图片到临时画布，保持原始比例
-    tempCtx.drawImage(uploadedImage, 0, 0, scaledWidth, scaledHeight);
-    
-    // 获取像素数据
-    const imageData = tempCtx.getImageData(0, 0, scaledWidth, scaledHeight);
-    const data = imageData.data;
-    
-    // 执行颜色量化，与generatePattern函数保持一致
-    const quantizedData = quantizeColors(imageData, selectedColorCount);
-    const palette = quantizedData.palette;
-    
-    // 生成格子图案
     const usedColors = new Set();
-    const colorMap = new Map(); // 用于颜色缓存，减少重复计算
-    
+
     for (let y = 0; y < scaledHeight; y++) {
         for (let x = 0; x < scaledWidth; x++) {
-            const index = (y * scaledWidth + x) * 4;
-            const r = data[index];
-            const g = data[index + 1];
-            const b = data[index + 2];
-            const a = data[index + 3];
-            
-            // 跳过透明像素
-            if (a < 128) continue;
-            
-            // 颜色缓存键
-            const colorKey = `${r},${g},${b}`;
-            
-            // 查找或计算最接近的颜色
-            let closestColor;
-            if (colorMap.has(colorKey)) {
-                closestColor = colorMap.get(colorKey);
-            } else {
-                // 找到最近的调色板颜色，与generatePattern函数保持一致
-                let minDistance = Infinity;
-                let selectedColor = palette[0];
-                
-                palette.forEach(color => {
-                    const colorRgb = hexToRgb(color.code);
-                    const distance = Math.sqrt(
-                        Math.pow(r - colorRgb.r, 2) +
-                        Math.pow(g - colorRgb.g, 2) +
-                        Math.pow(b - colorRgb.b, 2)
-                    );
-                    
-                    if (distance < minDistance) {
-                        minDistance = distance;
-                        selectedColor = color;
-                    }
-                });
-                
-                closestColor = selectedColor;
-                colorMap.set(colorKey, closestColor);
-            }
-            
-            // 应用颜色替换
-            let finalColorCode = closestColor.code;
-            if (colorReplaceMap.has(closestColor.code)) {
-                finalColorCode = colorReplaceMap.get(closestColor.code);
-            }
-            
-            // 应用用户的颜色映射，与generatePattern函数保持一致
-            if (userColorMap.has(closestColor.code)) {
-                finalColorCode = userColorMap.get(closestColor.code);
+            const index = y * scaledWidth + x;
+            const baseColorCode = pixelBaseColors[index];
+            if (!baseColorCode) continue;
+
+            let finalColorCode = baseColorCode;
+            if (colorReplaceMap.has(baseColorCode)) {
+                finalColorCode = colorReplaceMap.get(baseColorCode);
             }
             
             // 处理黑白两色
@@ -354,7 +297,7 @@ function generatePatternWithColorReplace(colorReplaceMap) {
             } else if (finalColorCode === '#FFFFFF') {
                 finalColor = { code: '#FFFFFF', name: 'White' };
             } else {
-                finalColor = colorPalette.find(c => c.code === finalColorCode) || closestColor;
+                finalColor = colorPalette.find(c => c.code === finalColorCode) || { code: finalColorCode, name: finalColorCode };
             }
             
             usedColors.add(finalColor.code);
@@ -373,7 +316,7 @@ function generatePatternWithColorReplace(colorReplaceMap) {
                     finalColorName = 'White';
                 } else {
                     const colorObj = colorPalette.find(c => c.code === finalColorCode);
-                    finalColorName = colorObj ? colorObj.name.replace('Mard_', '') : closestColor.name.replace('Mard_', '');
+                    finalColorName = colorObj ? colorObj.name.replace('Mard_', '') : finalColorCode;
                 }
                 
                 ctx.fillStyle = '#000';
@@ -390,7 +333,7 @@ function generatePatternWithColorReplace(colorReplaceMap) {
         drawGridLines(scaledWidth, scaledHeight, gridSize);
     }
     
-    // 生成颜色图例（只更新图例，不重新生成颜色替换控件）
+    // 只更新图例，避免在选择过程中重建下拉框导致选项抖动
     updateColorLegendOnly(usedColors);
     
     // 显示结果部分
@@ -435,8 +378,7 @@ function updateColorLegendOnly(usedColors) {
         }
     });
     
-    // 更新颜色替换控件中的选项，确保只显示当前使用的颜色
-    updateColorReplaceOptions(usedColors);
+    // 注意：这里不再更新颜色替换控件，避免每次应用时下拉选项被重置
 }
 
 // 更新颜色替换控件中的选项
@@ -1139,6 +1081,7 @@ function generatePattern() {
     // 生成格子图案
     const usedColors = new Set();
     const colorMap = new Map(); // 用于颜色缓存，减少重复计算
+    const pixelBaseColors = new Array(scaledWidth * scaledHeight).fill(null);
     
     for (let y = 0; y < scaledHeight; y++) {
         for (let x = 0; x < scaledWidth; x++) {
@@ -1189,6 +1132,7 @@ function generatePattern() {
             
             // 添加最终使用的颜色到集合中
             usedColors.add(finalColorCode);
+            pixelBaseColors[y * scaledWidth + x] = finalColorCode;
             
             // 绘制格子（确保是正方形）
             ctx.fillStyle = finalColorCode;
@@ -1223,6 +1167,13 @@ function generatePattern() {
     
     // 生成颜色图例
     generateColorLegend(usedColors);
+
+    // 缓存基础图纸颜色分布，供颜色替换稳定复用
+    latestPatternData = {
+        scaledWidth,
+        scaledHeight,
+        pixelBaseColors
+    };
     
     // 显示结果部分
     document.querySelector('.result-section').style.display = 'block';
