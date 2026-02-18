@@ -212,7 +212,8 @@ function initEventListeners() {
 
 // 应用颜色替换
 function applyColorReplace() {
-    const selectElements = document.querySelectorAll('.color-replace-select');
+    const controlsContainer = document.getElementById('color-replace-controls');
+    const selectElements = controlsContainer ? controlsContainer.querySelectorAll('.color-replace-select') : [];
     const colorReplaceMap = new Map();
     
     selectElements.forEach(select => {
@@ -223,12 +224,30 @@ function applyColorReplace() {
         }
     });
     
+    // 没有替换时回退到原始生成，避免停留在旧结果
     if (colorReplaceMap.size === 0) {
+        generatePattern();
         return;
     }
     
     // 重新生成图纸，应用颜色替换
     generatePatternWithColorReplace(colorReplaceMap);
+}
+
+// 读取并校验生成参数
+function getValidatedPatternOptions() {
+    const gridSize = parseInt(document.getElementById('grid-size').value, 10);
+    const maxWidth = parseInt(document.getElementById('max-width').value, 10);
+    const maxHeight = parseInt(document.getElementById('max-height').value, 10);
+    const showColorCodes = document.getElementById('show-color-codes').checked;
+    const showGridLines = document.getElementById('show-grid-lines').checked;
+
+    if (![gridSize, maxWidth, maxHeight].every(Number.isFinite) || gridSize <= 0 || maxWidth <= 0 || maxHeight <= 0) {
+        alert('参数无效：格子大小、最大宽度、最大高度必须是大于 0 的数字');
+        return null;
+    }
+
+    return { gridSize, maxWidth, maxHeight, showColorCodes, showGridLines };
 }
 
 // 使用颜色替换生成图纸
@@ -238,11 +257,9 @@ function generatePatternWithColorReplace(colorReplaceMap) {
     }
     
     // 获取参数
-    const gridSize = parseInt(document.getElementById('grid-size').value);
-    const maxWidth = parseInt(document.getElementById('max-width').value);
-    const maxHeight = parseInt(document.getElementById('max-height').value);
-    const showColorCodes = document.getElementById('show-color-codes').checked;
-    const showGridLines = document.getElementById('show-grid-lines').checked;
+    const options = getValidatedPatternOptions();
+    if (!options) return;
+    const { gridSize, maxWidth, maxHeight, showColorCodes, showGridLines } = options;
     
     // 计算缩放比例，保持图片原始比例
     const scale = Math.min(maxWidth / uploadedImage.width, maxHeight / uploadedImage.height);
@@ -564,7 +581,8 @@ let userColorMap = new Map();
 // 确认颜色匹配
 function confirmColorMatch() {
     // 收集用户的颜色映射选择
-    const selectElements = document.querySelectorAll('.color-replace-select');
+    const modalContainer = document.getElementById('color-map-container');
+    const selectElements = modalContainer ? modalContainer.querySelectorAll('.color-replace-select') : [];
     userColorMap.clear();
     
     selectElements.forEach(select => {
@@ -679,146 +697,227 @@ function updateImagePreviewWithColorReplace() {
 }
 
 // 颜色量化（k-means聚类）
-function quantizeColors(imageData, colorCount) {
-    const data = imageData.data;
-    const pixels = [];
-    
-    // 收集所有非透明像素
-    for (let i = 0; i < data.length; i += 4) {
-        const alpha = data[i + 3];
-        if (alpha > 128) {
-            pixels.push({
-                r: data[i],
-                g: data[i + 1],
-                b: data[i + 2],
-                a: alpha
+// RGB 转 LAB（用于更符合视觉感知的颜色距离）
+function rgbToLab(r, g, b) {
+    let rn = r / 255;
+    let gn = g / 255;
+    let bn = b / 255;
+
+    rn = rn > 0.04045 ? Math.pow((rn + 0.055) / 1.055, 2.4) : rn / 12.92;
+    gn = gn > 0.04045 ? Math.pow((gn + 0.055) / 1.055, 2.4) : gn / 12.92;
+    bn = bn > 0.04045 ? Math.pow((bn + 0.055) / 1.055, 2.4) : bn / 12.92;
+
+    const x = (rn * 0.4124 + gn * 0.3576 + bn * 0.1805) / 0.95047;
+    const y = (rn * 0.2126 + gn * 0.7152 + bn * 0.0722) / 1.0;
+    const z = (rn * 0.0193 + gn * 0.1192 + bn * 0.9505) / 1.08883;
+
+    const fx = x > 0.008856 ? Math.cbrt(x) : (7.787 * x) + (16 / 116);
+    const fy = y > 0.008856 ? Math.cbrt(y) : (7.787 * y) + (16 / 116);
+    const fz = z > 0.008856 ? Math.cbrt(z) : (7.787 * z) + (16 / 116);
+
+    return {
+        l: (116 * fy) - 16,
+        a: 500 * (fx - fy),
+        b: 200 * (fy - fz)
+    };
+}
+
+function calculateLabDistance(lab1, lab2) {
+    const dl = lab1.l - lab2.l;
+    const da = lab1.a - lab2.a;
+    const db = lab1.b - lab2.b;
+    return Math.sqrt(dl * dl + da * da + db * db);
+}
+
+function calculateRgbDistanceSq(c1, c2) {
+    const dr = c1.r - c2.r;
+    const dg = c1.g - c2.g;
+    const db = c1.b - c2.b;
+    return dr * dr + dg * dg + db * db;
+}
+
+function assignDistinctPaletteColors(centroids, clusterWeights) {
+    const paletteWithLab = colorPalette.map(color => {
+        const rgb = hexToRgb(color.code);
+        return {
+            ...color,
+            lab: rgbToLab(rgb.r, rgb.g, rgb.b)
+        };
+    });
+
+    const sortedCentroidIndices = centroids
+        .map((_, idx) => idx)
+        .sort((a, b) => (clusterWeights[b] || 0) - (clusterWeights[a] || 0));
+
+    const centroidLabs = centroids.map(c => rgbToLab(c.r, c.g, c.b));
+    const usedPaletteCodes = new Set();
+    const assigned = Array(centroids.length).fill(null);
+
+    sortedCentroidIndices.forEach((centroidIndex) => {
+        const centroidLab = centroidLabs[centroidIndex];
+        let bestColor = null;
+        let minDistance = Infinity;
+
+        paletteWithLab.forEach((candidate) => {
+            if (usedPaletteCodes.has(candidate.code)) return;
+            const distance = calculateLabDistance(centroidLab, candidate.lab);
+            if (distance < minDistance) {
+                minDistance = distance;
+                bestColor = candidate;
+            }
+        });
+
+        if (!bestColor) {
+            paletteWithLab.forEach((candidate) => {
+                const distance = calculateLabDistance(centroidLab, candidate.lab);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    bestColor = candidate;
+                }
             });
         }
+
+        assigned[centroidIndex] = { code: bestColor.code, name: bestColor.name };
+        usedPaletteCodes.add(bestColor.code);
+    });
+
+    return assigned;
+}
+
+// 颜色量化（改进版 k-means：稳定初始化 + 去重色卡映射）
+function quantizeColors(imageData, colorCount) {
+    const data = imageData.data;
+
+    const pixelMap = new Map();
+    for (let i = 0; i < data.length; i += 4) {
+        const alpha = data[i + 3];
+        if (alpha <= 128) continue;
+        const key = `${data[i]},${data[i + 1]},${data[i + 2]}`;
+        pixelMap.set(key, (pixelMap.get(key) || 0) + 1);
     }
-    
-    // 如果没有像素，返回原始数据
-    if (pixels.length === 0) {
+
+    const samples = Array.from(pixelMap.entries()).map(([key, count]) => {
+        const [r, g, b] = key.split(',').map(Number);
+        return { r, g, b, count };
+    });
+
+    if (samples.length === 0) {
         return {
             imageData: imageData,
             palette: []
         };
     }
-    
-    // 初始化聚类中心
-    let centroids = [];
-    for (let i = 0; i < colorCount; i++) {
-        const randomPixel = pixels[Math.floor(Math.random() * pixels.length)];
-        centroids.push({ r: randomPixel.r, g: randomPixel.g, b: randomPixel.b });
+
+    const clusterCount = Math.min(colorCount, samples.length, colorPalette.length);
+
+    const centroids = [];
+    const first = samples.reduce((a, b) => (a.count >= b.count ? a : b));
+    centroids.push({ r: first.r, g: first.g, b: first.b });
+
+    while (centroids.length < clusterCount) {
+        let bestSample = samples[0];
+        let bestScore = -1;
+
+        samples.forEach(sample => {
+            let minDist = Infinity;
+            centroids.forEach(c => {
+                const d = calculateRgbDistanceSq(sample, c);
+                if (d < minDist) minDist = d;
+            });
+            const score = minDist * Math.sqrt(sample.count);
+            if (score > bestScore) {
+                bestScore = score;
+                bestSample = sample;
+            }
+        });
+
+        centroids.push({ r: bestSample.r, g: bestSample.g, b: bestSample.b });
     }
-    
-    // 迭代聚类
-    let maxIterations = 10;
+
+    let clusterWeights = new Array(clusterCount).fill(0);
+    const maxIterations = 20;
+
     for (let iteration = 0; iteration < maxIterations; iteration++) {
-        // 分配像素到最近的聚类中心
-        const clusters = Array(colorCount).fill().map(() => []);
-        
-        pixels.forEach(pixel => {
-            let minDistance = Infinity;
-            let closestCentroidIndex = 0;
-            
+        const sums = Array(clusterCount).fill(0).map(() => ({ r: 0, g: 0, b: 0, w: 0 }));
+        clusterWeights = new Array(clusterCount).fill(0);
+
+        samples.forEach(sample => {
+            let closestIndex = 0;
+            let minDist = Infinity;
+
             centroids.forEach((centroid, index) => {
-                const distance = Math.sqrt(
-                    Math.pow(pixel.r - centroid.r, 2) +
-                    Math.pow(pixel.g - centroid.g, 2) +
-                    Math.pow(pixel.b - centroid.b, 2)
-                );
-                
-                if (distance < minDistance) {
-                    minDistance = distance;
-                    closestCentroidIndex = index;
+                const d = calculateRgbDistanceSq(sample, centroid);
+                if (d < minDist) {
+                    minDist = d;
+                    closestIndex = index;
                 }
             });
-            
-            clusters[closestCentroidIndex].push(pixel);
+
+            sums[closestIndex].r += sample.r * sample.count;
+            sums[closestIndex].g += sample.g * sample.count;
+            sums[closestIndex].b += sample.b * sample.count;
+            sums[closestIndex].w += sample.count;
+            clusterWeights[closestIndex] += sample.count;
         });
-        
-        // 更新聚类中心
-        let newCentroids = centroids.map((centroid, index) => {
-            const cluster = clusters[index];
-            if (cluster.length === 0) {
-                return centroid;
+
+        let moved = 0;
+        for (let i = 0; i < clusterCount; i++) {
+            if (sums[i].w === 0) {
+                let farthestSample = samples[0];
+                let farthestDist = -1;
+                samples.forEach(sample => {
+                    let dmin = Infinity;
+                    centroids.forEach(c => {
+                        const d = calculateRgbDistanceSq(sample, c);
+                        if (d < dmin) dmin = d;
+                    });
+                    if (dmin > farthestDist) {
+                        farthestDist = dmin;
+                        farthestSample = sample;
+                    }
+                });
+                centroids[i] = { r: farthestSample.r, g: farthestSample.g, b: farthestSample.b };
+                moved += 1;
+                continue;
             }
-            
-            const sum = cluster.reduce((acc, pixel) => {
-                return {
-                    r: acc.r + pixel.r,
-                    g: acc.g + pixel.g,
-                    b: acc.b + pixel.b
-                };
-            }, { r: 0, g: 0, b: 0 });
-            
-            return {
-                r: Math.round(sum.r / cluster.length),
-                g: Math.round(sum.g / cluster.length),
-                b: Math.round(sum.b / cluster.length)
-            };
-        });
-        
-        // 检查收敛
-        const converged = centroids.every((centroid, index) => {
-            const newCentroid = newCentroids[index];
-            return Math.abs(centroid.r - newCentroid.r) < 1 &&
-                   Math.abs(centroid.g - newCentroid.g) < 1 &&
-                   Math.abs(centroid.b - newCentroid.b) < 1;
-        });
-        
-        if (converged) {
-            break;
+
+            const nr = Math.round(sums[i].r / sums[i].w);
+            const ng = Math.round(sums[i].g / sums[i].w);
+            const nb = Math.round(sums[i].b / sums[i].w);
+            moved += Math.abs(centroids[i].r - nr) + Math.abs(centroids[i].g - ng) + Math.abs(centroids[i].b - nb);
+            centroids[i] = { r: nr, g: ng, b: nb };
         }
-        
-        centroids = newCentroids;
+
+        if (moved < clusterCount) break;
     }
-    
-    // 为每个聚类中心找到最接近的色卡颜色
-    const palette = centroids.map(centroid => {
-        return findClosestColor(centroid.r, centroid.g, centroid.b);
-    });
-    
-    // 创建量化后的图像数据
+
+    const palette = assignDistinctPaletteColors(centroids, clusterWeights);
+
     const quantizedData = new Uint8ClampedArray(data);
     for (let i = 0; i < data.length; i += 4) {
         const alpha = data[i + 3];
-        if (alpha > 128) {
-            const pixel = {
-                r: data[i],
-                g: data[i + 1],
-                b: data[i + 2]
-            };
-            
-            // 找到最近的聚类中心
-            let minDistance = Infinity;
-            let closestPaletteIndex = 0;
-            
-            centroids.forEach((centroid, index) => {
-                const distance = Math.sqrt(
-                    Math.pow(pixel.r - centroid.r, 2) +
-                    Math.pow(pixel.g - centroid.g, 2) +
-                    Math.pow(pixel.b - centroid.b, 2)
-                );
-                
-                if (distance < minDistance) {
-                    minDistance = distance;
-                    closestPaletteIndex = index;
-                }
-            });
-            
-            // 使用调色板中的颜色
-            const selectedColor = hexToRgb(palette[closestPaletteIndex].code);
-            quantizedData[i] = selectedColor.r;
-            quantizedData[i + 1] = selectedColor.g;
-            quantizedData[i + 2] = selectedColor.b;
-        }
+        if (alpha <= 128) continue;
+
+        const pixel = { r: data[i], g: data[i + 1], b: data[i + 2] };
+        let closestIndex = 0;
+        let minDist = Infinity;
+
+        centroids.forEach((centroid, index) => {
+            const d = calculateRgbDistanceSq(pixel, centroid);
+            if (d < minDist) {
+                minDist = d;
+                closestIndex = index;
+            }
+        });
+
+        const selectedColor = hexToRgb(palette[closestIndex].code);
+        quantizedData[i] = selectedColor.r;
+        quantizedData[i + 1] = selectedColor.g;
+        quantizedData[i + 2] = selectedColor.b;
     }
-    
-    const quantizedImageData = new ImageData(quantizedData, imageData.width, imageData.height);
-    
+
     return {
-        imageData: quantizedImageData,
+        imageData: new ImageData(quantizedData, imageData.width, imageData.height),
         palette: palette
     };
 }
@@ -919,7 +1018,8 @@ function updateColorPreviewWithReplace() {
     if (!originalImageData) return;
     
     // 收集当前的颜色映射选择
-    const selectElements = document.querySelectorAll('.color-replace-select');
+    const modalContainer = document.getElementById('color-map-container');
+    const selectElements = modalContainer ? modalContainer.querySelectorAll('.color-replace-select') : [];
     const tempColorMap = new Map();
     
     selectElements.forEach(select => {
@@ -1002,11 +1102,9 @@ function generatePattern() {
     }
     
     // 获取参数
-    const gridSize = parseInt(document.getElementById('grid-size').value);
-    const maxWidth = parseInt(document.getElementById('max-width').value);
-    const maxHeight = parseInt(document.getElementById('max-height').value);
-    const showColorCodes = document.getElementById('show-color-codes').checked;
-    const showGridLines = document.getElementById('show-grid-lines').checked;
+    const options = getValidatedPatternOptions();
+    if (!options) return;
+    const { gridSize, maxWidth, maxHeight, showColorCodes, showGridLines } = options;
     
     // 计算缩放比例，保持图片原始比例
     const scale = Math.min(maxWidth / uploadedImage.width, maxHeight / uploadedImage.height);
@@ -1333,7 +1431,8 @@ function generateColorReplaceControls(usedColors) {
 
 // 实时应用颜色替换
 function applyRealTimeColorReplace() {
-    const selectElements = document.querySelectorAll('.color-replace-select');
+    const controlsContainer = document.getElementById('color-replace-controls');
+    const selectElements = controlsContainer ? controlsContainer.querySelectorAll('.color-replace-select') : [];
     const colorReplaceMap = new Map();
     
     // 收集所有颜色替换选择
@@ -1345,7 +1444,9 @@ function applyRealTimeColorReplace() {
         }
     });
     
+    // 没有替换时回退到原始生成，避免停留在旧结果
     if (colorReplaceMap.size === 0) {
+        generatePattern();
         return;
     }
     
